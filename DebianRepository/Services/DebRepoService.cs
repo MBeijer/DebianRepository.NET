@@ -2,54 +2,84 @@ using System.Security.Cryptography;
 using System.Text;
 using DebianRepository.Extensions;
 using DebianRepository.Models;
-using Org.BouncyCastle.Bcpg;
-using Org.BouncyCastle.Bcpg.OpenPgp;
+using DebianRepository.Providers;
+using DebianRepository.Systems;
 
 namespace DebianRepository.Services;
 
-public class DebRepoService
+public class DebRepoService : IDebRepoService
 {
-	private readonly string           _storagePath;
-	private readonly string           _privateKeyPath;
-	private readonly string           _passphrase;
-	private readonly List<DebPackage> _packages = [];
+	private readonly string _storagePath;
+	private IReadOnlyCollection<BaseFile> Packages => _fileSystem.ListFiles();
 
-	public DebRepoService(IConfiguration config)
+	private readonly ILogger<DebRepoService> _logger;
+	private readonly IGpgProvider            _gpgProvider;
+	private readonly IFileSystem             _fileSystem;
+
+	public DebRepoService(ILogger<DebRepoService> logger, IConfiguration config, IGpgProvider gpgProvider, IFileSystem fileSystem)
 	{
-		_storagePath    = config["DEB_STORAGE_PATH"] ?? "/var/lib/debrepo/packages";
-		_privateKeyPath = config["GPG_PRIVATE_KEY"] ?? "/var/lib/debrepo/private.asc";
-		_passphrase     = config["GPG_PASSPHRASE"] ?? throw new("GPG_PASSPHRASE not set");
-		Directory.CreateDirectory(_storagePath);
-		LoadFromDisk();
+		_logger      = logger;
+		_storagePath = config["DEB_STORAGE_PATH"] ?? "/var/lib/debrepo/packages";
+		_gpgProvider = gpgProvider;
+		_fileSystem  = fileSystem;
+
+		fileSystem.SetFilter("*.deb");
+		fileSystem.SetOnAddFileCallback(OnAddFile);
+		fileSystem.SetRootDirectory(_storagePath).ConfigureAwait(false).GetAwaiter().GetResult();
 	}
 
-	private void LoadFromDisk()
+	private async Task<BaseFile> OnAddFile(string fullPath)
 	{
-		var files = Directory.GetFiles(_storagePath, "*.deb", SearchOption.AllDirectories);
-		foreach (var file in files) AddDebPackage(File.ReadAllBytes(file), false);
+		var data = await _fileSystem.GetFileData(fullPath).ConfigureAwait(false);
+		var dist = "stable";
+		var pool = "main";
+
+		var path = fullPath.Replace(_storagePath, "").Split('/');
+		if (path.Length >= 3)
+		{
+			dist = path[0];
+			pool = path[1];
+		}
+		
+		var deb  = new DebPackage(fileContent: data, controlFields: data.ExtractControlData(), dist, pool);
+		
+		var dir = Path.Combine(_storagePath, dist, pool, deb.PackageName);
+		Directory.CreateDirectory(dir);
+		var filename = Path.Combine(dir, deb.Filename);
+		
+		if (!fullPath.Equals(filename))
+			_fileSystem.MoveFile(fullPath, filename);
+
+		return deb;
 	}
 
-	public void AddDebPackage(byte[] debContent, bool saveToDisk = true)
+
+	public async Task AddDebPackage(string dist, string pool, byte[] debContent, bool saveToDisk = true, string oldPath = "")
 	{
-		var metadata = debContent.ExtractControlData();
-		var deb      = new DebPackage(fileContent: debContent, controlFields: metadata);
+		var deb      = new DebPackage(fileContent: debContent, controlFields: debContent.ExtractControlData(), dist, pool);
+
+		_logger.LogInformation("Adding package - Dist: {Dist}, Pool: {Pool}, Arch: {DebArchitecture}, Package: {DebPackageName}, Version: {DebVersion}", dist, pool, deb.Architecture, deb.PackageName, deb.Version);
 
 		if (saveToDisk)
 		{
-			var dir = Path.Combine(_storagePath, deb.PackageName);
+			var dir = Path.Combine(_storagePath, dist, pool, deb.PackageName);
 			Directory.CreateDirectory(dir);
 			var filename = Path.Combine(dir, deb.Filename);
-			File.WriteAllBytes(filename, debContent);
+			_logger.LogInformation("Saving package file to \"{FileName}\"", filename);
+			if (!string.IsNullOrEmpty(oldPath))
+				_fileSystem.MoveFile(oldPath, filename);
+			else
+				await _fileSystem.SaveFile(filename, debContent).ConfigureAwait(false);
 		}
-
-		_packages.Add(deb);
 	}
+	
 
-	public string GetPackagesFile(string arch)
+	public string GetPackagesFile(string dist, string pool, string arch)
 	{
 		var sb = new StringBuilder();
-		foreach (var pkg in _packages.Where(p=>p.Architecture.Equals(arch)).OrderBy(p => p.PackageName)
-		                             .ThenByDescending(p => p.Version))
+		foreach (var pkg in Packages.OfType<DebPackage>().Where(p=> p.Architecture.Equals(arch) && p.Pool.Equals(pool) && p.Dist.Equals(dist))
+		                             .OrderBy(p => p?.PackageName)
+		                             .ThenByDescending(p => p?.Version))
 		{
 			foreach (var (key, value) in pkg.ControlFields)
 			{
@@ -57,126 +87,61 @@ public class DebRepoService
 					sb.AppendLine($"{key}: {value}");
 			}
 
-			sb.AppendLine($"Filename: pool/main/{pkg.Filename}");
+			sb.AppendLine($"Filename: pool/{pool}/{pkg.Filename}");
 			sb.AppendLine($"Size: {pkg.Size}");
 			sb.AppendLine($"MD5sum: {pkg.HashMd5}");
 			sb.AppendLine($"SHA1: {pkg.HashSha1}");
 			sb.AppendLine($"SHA256: {pkg.HashSha256}");
+
 			sb.AppendLine();
 		}
 
 		return sb.ToString();
 	}
 
-	public string GetReleaseFile()
+	private IEnumerable<string> GetArchitectures(string dist) => Packages.OfType<DebPackage>().Where(pkg=> pkg.Dist.Equals(dist)).Select(pkg => pkg.Architecture).Distinct();
+	private IEnumerable<string> GetPools(string dist)         => Packages.OfType<DebPackage>().Where(pkg=> pkg.Dist.Equals(dist)).Select(pkg => pkg.Pool).Distinct();
+
+	public string GetReleaseFile(string dist)
 	{
-		var packages = Encoding.UTF8.GetBytes(GetPackagesFile("amd64"));
-		var sb       = new StringBuilder();
+		var architectures = GetArchitectures(dist).ToArray();
+		var pools         = GetPools(dist).ToArray();
+
+		var sb            = new StringBuilder();
 		sb.AppendLine("Origin: DebianRepo");
 		sb.AppendLine("Label: DebianRepo");
-		sb.AppendLine("Suite: stable");
-		sb.AppendLine("Codename: stable");
+		sb.AppendLine($"Suite: {dist}");
+		sb.AppendLine($"Codename: {dist}");
 		sb.AppendLine("Date: " + DateTime.UtcNow.ToString("r")); // RFC1123 format
-		sb.AppendLine("Architectures: amd64");
-		sb.AppendLine("Components: main");
+		sb.AppendLine($"Architectures: {string.Join(' ', architectures)}");
+		sb.AppendLine($"Components: {string.Join(' ', pools)}");
+
+		var md5     = new StringBuilder();
+		var md52    = MD5.Create();
+		var sha256  = new StringBuilder();
+		var sha2562 = SHA256.Create();
+
+		foreach (var pool in pools)
+		{
+			foreach (var architecture in architectures)
+			{
+				var packages      = Encoding.UTF8.GetBytes(GetPackagesFile(dist, pool, architecture));
+				md5.AppendLine($" {packages.ComputeHash(md52)} {packages.Length,8} {pool}/binary-{architecture}/Packages");
+				sha256.AppendLine($" {packages.ComputeHash(sha2562)} {packages.Length,8} {pool}/binary-{architecture}/Packages");
+			}
+		}
 		sb.AppendLine("MD5Sum:");
-		sb.AppendLine($" {packages.ComputeHash(MD5.Create())} {packages.Length,8} main/binary-amd64/Packages");
+		sb.Append(md5);
 		sb.AppendLine("SHA256:");
-		sb.AppendLine($" {packages.ComputeHash(SHA256.Create())} {packages.Length,8} main/binary-amd64/Packages");
+		sb.Append(sha256);
+
+
 		return sb.ToString();
 	}
 
-	public async Task<string> GetInReleaseAsync()
-	{
-		var content = GetReleaseFile();
-		return await SignAsciiArmoredAsync(content);
-	}
+	public Task<string> GetInRelease(string dist) => _gpgProvider.SignAsciiArmored(GetReleaseFile(dist));
 
-	public byte[] GetReleaseGpg() => CreateDetachedSignature(Encoding.UTF8.GetBytes(GetReleaseFile()));
+	public byte[] GetReleaseGpg(string dist) => _gpgProvider.CreateDetachedSignature(Encoding.UTF8.GetBytes(GetReleaseFile(dist)));
 
-	public DebPackage? GetPackageByFilename(string filename) => _packages.FirstOrDefault(p => p.Filename == filename);
-
-	public byte[] GetPublicKey()
-	{
-		using var keyIn         = File.OpenRead(_privateKeyPath);
-		var       keyRingBundle = new PgpSecretKeyRingBundle(PgpUtilities.GetDecoderStream(keyIn));
-		var       publicOut     = new MemoryStream();
-		var       armoredOut    = new ArmoredOutputStream(publicOut);
-
-		foreach (var secretKeyRing in keyRingBundle.GetKeyRings())
-			secretKeyRing.GetPublicKey().Encode(armoredOut);
-
-		armoredOut.Close();
-		return publicOut.ToArray();
-	}
-
-	private async Task<string> SignAsciiArmoredAsync(string content)
-	{
-		var secretKey  = GetSigningSecretKey();
-		var privateKey = secretKey.ExtractPrivateKey(_passphrase.ToCharArray());
-
-		var sigGen = new PgpSignatureGenerator(secretKey.PublicKey.Algorithm, HashAlgorithmTag.Sha256);
-		sigGen.InitSign(PgpSignature.CanonicalTextDocument, privateKey);
-
-		using var       output     = new MemoryStream();
-		await using var armoredOut = new ArmoredOutputStream(output);
-		armoredOut.SetHeader("Version", null);
-		armoredOut.BeginClearText(HashAlgorithmTag.Sha256);
-
-		var canonicalLines = content.Replace("\r", "").Split('\n');
-		foreach (var line in canonicalLines)
-		{
-			var canonicalLine = line.StartsWith('-') ? "- " + line : line;
-			var signBytes     = Encoding.ASCII.GetBytes(canonicalLine + "\r\n"); // canonical
-			sigGen.Update(signBytes);
-
-			var displayLine = canonicalLine + "\n"; // visible
-			var writeBytes  = Encoding.ASCII.GetBytes(displayLine);
-			await armoredOut.WriteAsync(writeBytes);
-		}
-
-		// ✅ Add final newline after the last content line
-		await armoredOut.WriteAsync(Encoding.ASCII.GetBytes("\n"));
-
-		armoredOut.EndClearText();
-		sigGen.Generate().Encode(armoredOut);
-		armoredOut.Close();
-
-		return Encoding.ASCII.GetString(output.ToArray());
-	}
-
-
-	private PgpSecretKey GetSigningSecretKey()
-	{
-		using var keyIn         = File.OpenRead(_privateKeyPath);
-		var       keyRingBundle = new PgpSecretKeyRingBundle(PgpUtilities.GetDecoderStream(keyIn));
-
-		return keyRingBundle.GetKeyRings()
-		                    .SelectMany(kr => kr.GetSecretKeys())
-		                    .FirstOrDefault(k => k.IsSigningKey)
-		       ?? throw new("No signing key found in keyring.");
-	}
-
-	private byte[] CreateDetachedSignature(byte[] content)
-	{
-		using var keyIn   = File.OpenRead(_privateKeyPath);
-		var       keyRing = new PgpSecretKeyRingBundle(PgpUtilities.GetDecoderStream(keyIn));
-		var key = keyRing.GetKeyRings()
-		                 .SelectMany(r => r.GetSecretKeys())
-		                 .FirstOrDefault(k => k.IsSigningKey);
-
-		if (key == null) throw new("No signing key found");
-		var privateKey = key.ExtractPrivateKey(_passphrase.ToCharArray());
-
-		var sigGen = new PgpSignatureGenerator(key.PublicKey.Algorithm, HashAlgorithmTag.Sha256);
-		sigGen.InitSign(PgpSignature.BinaryDocument, privateKey);
-		sigGen.Update(content);
-
-		using var sigStream  = new MemoryStream();
-		var       armoredOut = new ArmoredOutputStream(sigStream);
-		sigGen.Generate().Encode(armoredOut);
-		armoredOut.Close();
-
-		return sigStream.ToArray();
-	}
+	public DebPackage? GetPackageByFilename(string pool, string filename) => Packages.OfType<DebPackage>().FirstOrDefault(p => p.Filename == filename);
 }

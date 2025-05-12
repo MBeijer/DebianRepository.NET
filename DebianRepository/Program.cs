@@ -1,5 +1,7 @@
 using System.Text;
+using DebianRepository.Providers;
 using DebianRepository.Services;
+using DebianRepository.Systems;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.IdentityModel.Tokens;
@@ -44,7 +46,9 @@ public static class Program
 
 		builder.Services.AddAuthorization();
 		builder.Services.AddControllers();
-		builder.Services.AddSingleton<DebRepoService>();
+		builder.Services.AddSingleton<IFileSystem, FileSystem>();
+		builder.Services.AddSingleton<IDebRepoService, DebRepoService>();
+		builder.Services.AddSingleton<IGpgProvider, GpgProvider>();
 		builder.Services.AddEndpointsApiExplorer();
 		builder.Services.AddSwaggerGen();
 
@@ -56,11 +60,15 @@ public static class Program
 			app.UseSwaggerUI();
 		}
 
+		var t = new Thread(() => app.Services.GetRequiredService<IDebRepoService>());
+		t.Start();
+
 		app.UseRouting();
 		app.UseAuthentication();
 		app.UseAuthorization();
 		app.MapControllers();
 
 		app.Run();
+		t.Join();
 	}
 }

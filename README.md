@@ -29,7 +29,7 @@ docker run -p 5048:5048 -e GPG_PASSPHRASE="YOUR_GPG_PASSPHRASE" -e JWT_SECRET="Y
 
 ```bash
 curl -fsSL http://localhost:5048/debian/pubkey.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/debrepo.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/trusted.gpg.d/debrepo.gpg] http://localhost:5048/repo stable main" | sudo tee /etc/apt/sources.list.d/debrepo.list
+echo "deb [signed-by=/etc/apt/trusted.gpg.d/debrepo.gpg] http://localhost:5048/debian stable main" | sudo tee /etc/apt/sources.list.d/debrepo.list
 sudo apt update
 sudo apt install your-package-name
 ```
