@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using DebianRepository.Providers;
 using DebianRepository.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -10,7 +11,7 @@ namespace DebianRepository.Controllers;
 
 [Route("debian")]
 [ApiController]
-public class DebRepoController(DebRepoService repo, IConfiguration config) : ControllerBase
+public class DebRepoController(IDebRepoService repo, IConfiguration config, IGpgProvider gpgProvider) : ControllerBase
 {
     [HttpPost("login")]
     public IActionResult Login([FromForm] string username, [FromForm] string password)
@@ -33,38 +34,39 @@ public class DebRepoController(DebRepoService repo, IConfiguration config) : Con
     }
 
     [HttpPost("upload")]
+    [HttpPost("upload/{dist}/{pool}")]
     [Authorize]
-    public async Task<IActionResult> Upload([FromForm] IFormFile file)
+    public async Task<IActionResult> Upload([FromForm] IFormFile file, string dist = "stable", string pool = "main")
     {
         if (file == null || !file.FileName.EndsWith(".deb"))
             return BadRequest("Must upload a .deb file");
 
         using var ms = new MemoryStream();
         await file.CopyToAsync(ms);
-        repo.AddDebPackage(ms.ToArray());
+        await repo.AddDebPackage(dist, pool, ms.ToArray()).ConfigureAwait(false);
 
         return Ok("Uploaded and indexed");
     }
 
-    [HttpGet("dists/stable/Release")]
-    public IActionResult Release() => Content(repo.GetReleaseFile(), "text/plain");
+    [HttpGet("dists/{dist}/Release")]
+    public IActionResult Release(string dist) => Content(repo.GetReleaseFile(dist), "text/plain");
 
-    [HttpGet("dists/stable/Release.gpg")]
-    public IActionResult ReleaseGpg() => File(repo.GetReleaseGpg(), "application/pgp-signature", "Release.gpg");
+    [HttpGet("dists/{dist}/Release.gpg")]
+    public IActionResult ReleaseGpg(string dist) => File(repo.GetReleaseGpg(dist), "application/pgp-signature", "Release.gpg");
 
-    [HttpGet("dists/stable/InRelease")]
-    public async Task<IActionResult> InRelease() => File(Encoding.UTF8.GetBytes(await repo.GetInReleaseAsync()), "application/octet-stream", "InRelease");
+    [HttpGet("dists/{dist}/InRelease")]
+    public async Task<IActionResult> InRelease(string dist) => File(Encoding.UTF8.GetBytes(await repo.GetInRelease(dist)), "application/octet-stream", "InRelease");
 
     [HttpGet("pubkey.gpg")]
-    public IActionResult PublicKey() => File(repo.GetPublicKey(), "application/pgp-keys", "repo-publickey.gpg");
+    public IActionResult PublicKey() => File(gpgProvider.GetPublicKey(), "application/pgp-keys", "repo-publickey.gpg");
 
-    [HttpGet("dists/stable/main/binary-{arch}/Packages")]
-    public IActionResult Packages(string arch) => Content(repo.GetPackagesFile(arch), "text/plain");
+    [HttpGet("dists/{dist}/{pool}/binary-{arch}/Packages")]
+    public IActionResult Packages(string dist, string pool, string arch) => Content(repo.GetPackagesFile(dist, pool, arch), "text/plain");
 
-    [HttpGet("pool/main/{filename}")]
-    public IActionResult Deb(string filename)
+    [HttpGet("pool/{pool}/{filename}")]
+    public IActionResult Deb(string pool, string filename)
     {
-        var pkg = repo.GetPackageByFilename(filename);
+        var pkg = repo.GetPackageByFilename(pool, filename);
         if (pkg == null)
             return NotFound();
 

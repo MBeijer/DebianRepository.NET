@@ -4,13 +4,15 @@ using DebianRepository.Extensions;
 
 namespace DebianRepository.Models;
 
-public class DebPackage
+public class DebPackage : BaseFile
 {
 	[method: SetsRequiredMembers]
-	public DebPackage(byte[] fileContent, Dictionary<string, string> controlFields)
+	public DebPackage(byte[] fileContent, Dictionary<string, string> controlFields, string dist, string pool)
 	{
 		ControlFields = controlFields;
 		FileContent   = fileContent;
+		Dist          = dist;
+		Pool          = pool;
 
 		HashMd5    = FileContent.ComputeHash(MD5.Create());
 		HashSha1   = FileContent.ComputeHash(SHA1.Create());
@@ -25,9 +27,8 @@ public class DebPackage
 	public string Architecture => ControlFields["Architecture"];
 	public string Maintainer   => ControlFields["Maintainer"];
 	public string Description  => ControlFields["Description"];
-	public string HashMd5      { get; }
-	public string HashSha1     { get; }
-	public string HashSha256   { get; }
+	public string Dist         { get; }
+	public string Pool         { get; }
 	public long   Size         => FileContent.Length;
 
 	public int InstalledSize
@@ -41,6 +42,6 @@ public class DebPackage
 		}
 	}
 
-	public string Filename =>
+	public override string Filename =>
 		$"{ControlFields["Package"]}_{ControlFields["Version"]}_{ControlFields["Architecture"]}.deb";
 }

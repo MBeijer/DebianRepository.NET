@@ -1,7 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
-using Org.BouncyCastle.Utilities.Zlib;
 using SharpCompress.Compressors.Xz;
 using SharpCompress.Readers;
 using ZstdSharp;
