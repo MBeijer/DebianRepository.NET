@@ -20,6 +20,7 @@ public class FileSystem(ILogger<FileSystem> logger) : IFileSystem
 
 		if (!Directory.Exists(_basePath))
 			Directory.CreateDirectory(_basePath);
+		logger.LogInformation("RootDirectory set: {Directory}", _basePath);
 
 		await Init().ConfigureAwait(false);
 	}
@@ -145,6 +146,9 @@ public class FileSystem(ILogger<FileSystem> logger) : IFileSystem
 			_files[fileNameLower] = new DefaultFile(fullPath);
 
 		_files[fileNameLower].Path = fullPath.Replace(_basePath, "");
+		
+		logger.LogInformation("File Added: {EFullPath}", fullPath);
+
 
 		if (_fileAvailabilityCallbacks.TryGetValue(fileNameLower, out var callbacks))
 		{
@@ -161,9 +165,6 @@ public class FileSystem(ILogger<FileSystem> logger) : IFileSystem
 		foreach (var fullPath in Directory.GetFiles(_basePath, _filter, SearchOption.AllDirectories))
 		{
 			await AddFile(fullPath).ConfigureAwait(false);
-#if DEBUG
-			logger.LogDebug("Added: {EFullPath}", fullPath.Replace(_basePath, ""));
-#endif
 		}
 
 		_watcher?.Dispose();
